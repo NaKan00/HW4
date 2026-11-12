@@ -1,0 +1,61 @@
+@startuml
+skinparam defaultFontName SansSerif
+skinparam shadowing false
+skinparam sequenceMessageAlign center
+title Вариант 1: C4 Container — платформа уведомлений
+left to right direction
+actor "Клиент банка" as U
+actor "Оператор поддержки" as OP
+rectangle "Продуктовые сервисы банка\n[внешняя система]" as BANK
+rectangle "Notification Platform [система]" {
+ rectangle "Notification API / Gateway\n[контейнер: приём, авторизация, outbox]" as API
+ queue "Apache Kafka\nТемы critical / service / marketing\nКоманды и результаты: critical отдельно от bulk" as B
+ rectangle "Notification Orchestrator\n[контейнер: автомат и сверка сроков]" as O
+ rectangle "Предпочтения и политика\n[контейнер: чтение и изменение]" as PREF
+ database "PostgreSQL\n[критичный кластер: состояние, outbox, аудит]\n[отдельный bulk-кластер]" as DB
+ database "Redis\n[восстановимый кэш политики и здоровья]" as R
+ rectangle "Push Worker\n[раздельные critical / bulk пулы]" as PW
+ rectangle "SMS Worker\n[раздельные critical / bulk пулы]" as SW
+ rectangle "Email Worker\n[раздельные critical / bulk пулы]" as EW
+ rectangle "Наблюдение\nPrometheus / Grafana / OpenTelemetry\nСтруктурированные журналы" as OBS
+}
+cloud "Push-провайдер\n[внешняя система]" as PP
+cloud "SMS-провайдер\n[внешняя система]" as SP
+cloud "Email-провайдер\n[внешняя система]" as EP
+BANK --> API : HTTPS: запрос со стабильным ID
+U --> PREF : HTTPS: настройки через банковский интерфейс
+OP --> API : HTTPS: история по роли
+API --> DB : SQL/TLS: принятие + outbox
+API --> B : Kafka/TLS: публикатор outbox, acks=all
+B --> O : Kafka: группа на категорию
+O --> DB : SQL/TLS: состояние + команды outbox
+O --> PREF : HTTPS: версия политики
+PREF --> DB : SQL/TLS: источник предпочтений
+PREF --> R : TLS: кэш
+O --> R : TLS: здоровье провайдеров
+O --> B : Kafka: команды из outbox
+B --> PW : задания push
+B --> SW : задания SMS
+B --> EW : задания email
+PW --> DB : SQL/TLS: аренда и результат + outbox
+SW --> DB : SQL/TLS: аренда и результат + outbox
+EW --> DB : SQL/TLS: аренда и результат + outbox
+PW --> B : результат из outbox
+SW --> B : результат из outbox
+EW --> B : результат из outbox
+PW --> PP : HTTPS: ключ, срок, квота
+SW --> SP : HTTPS: ключ, срок, квота
+EW --> EP : HTTPS: ключ, срок, квота
+PP --> U : push
+SP --> U : SMS
+EP --> U : email
+API ..> OBS : метрики, журналы, трассы
+O ..> OBS : аудит, сроки, DLQ
+PW ..> OBS : задержки и ошибки
+SW ..> OBS : ошибки и стоимость
+EW ..> OBS : задержки и ошибки
+note bottom of B
+ Отдельные критичные и массовые ресурсы, квоты и соединения.
+ PostgreSQL — источник истины; кэш не хранит единственную копию.
+end note
+@enduml

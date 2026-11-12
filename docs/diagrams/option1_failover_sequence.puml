@@ -1,0 +1,59 @@
+@startuml
+skinparam defaultFontName SansSerif
+skinparam shadowing false
+skinparam sequenceMessageAlign center
+title Вариант 1: push → SMS → email при отказах
+queue "Kafka: critical-команды / результаты" as K
+participant "Оркестратор и планировщик" as O
+database "PostgreSQL" as D
+participant "Пулы каналов" as W
+participant "Push-провайдер" as P
+participant "SMS-провайдер" as S
+participant "Email-провайдер" as E
+participant "Наблюдение" as M
+note over O,D : IN_PROGRESS; состояние переживает перезапуск
+O -> D : PENDING push + outbox
+O -> K : Команда из outbox
+K -> W : push
+W -> D : Аренда; IN_FLIGHT
+W -> P : Первая попытка
+P --> W : Временная ошибка 503
+W -> D : TRANSIENT_FAILED + outbox результата
+W -> K : Коммит смещения; результат
+K -> O : Ошибка push
+O -> D : next_action_at с jitter\nНовая запись физического повтора
+O -> K : Повтор из outbox в назначенный срок
+K -> W : push retry
+W -> P : Тот же логический ключ
+P --> W : Повторная временная ошибка
+W -> D : Ошибка и outbox результата
+W -> K : Результат; смещение после коммита
+K -> O : Бюджет push исчерпан
+O -> D : Push завершён неуспешно\nSMS_PENDING + outbox
+O -> K : Следующий канал ≤ 2 с от обнаружения
+K -> W : SMS
+W -> S : Вызов с квотой и сроком
+S --> W : 503, временно недоступен
+W -> D : Ошибка + outbox результата
+W -> K : Результат SMS
+K -> O : Ошибка SMS
+O -> O : Контур SMS открыт по общему здоровью\nПовтор пропущен, выбор email
+O -> D : SMS завершён; EMAIL_PENDING + outbox
+O -> K : Команда email
+K -> W : email
+W -> E : Вызов с идемпотентным ключом
+E --> W : Принято + provider_message_id
+W -> D : SUCCEEDED + outbox результата
+W -> K : Результат email
+K -> O : Успех
+O -> D : DELIVERED, отменить ожидающие команды
+O -> M : Переходы, задержка, стоимость, аудит
+K -> W : Возможный повтор старой команды
+W -> D : Проверить DELIVERED
+D --> W : Не отправлять; подтвердить повтор
+note over O,W
+ Все изменения с outbox атомарны; смещения после коммита.
+ Неопределённый таймаут: сначала статус провайдера в бюджете.
+ Поздний успех не исключает внешний дубль, но не запускает новую отправку.
+end note
+@enduml

@@ -1,0 +1,43 @@
+@startuml
+skinparam defaultFontName SansSerif
+skinparam shadowing false
+skinparam sequenceMessageAlign center
+title Вариант 1: успешный основной push
+participant "Продукт банка" as P
+participant "API и публикатор outbox" as A
+database "PostgreSQL" as D
+queue "Kafka" as K
+participant "Оркестратор" as O
+participant "Предпочтения / политика" as F
+participant "Push Worker" as W
+participant "Push-провайдер" as X
+participant "Наблюдение" as M
+P -> P : Создать устойчивый notification_id
+P -> A : HTTPS: запрос с тем же ID при повторе
+A -> D : Транзакция: уникальный (source, ID)\nACCEPTED + outbox
+D --> A : Синхронно реплицированный коммит
+A --> P : 202: устойчиво принято
+A -> K : notifications.transactional\nПубликация outbox, acks=all
+K --> A : Подтверждение публикации
+K -> O : Событие, ключ user_id
+O -> F : Версия политики, допустимые каналы
+F --> O : Push основной
+O -> D : Проверка event_id и версии\nPLANNED → IN_PROGRESS\nСоздать PENDING + outbox команды
+D --> O : Коммит
+O -> K : Фиксация смещения после коммита
+O -> K : Outbox → delivery.push.critical
+K -> W : Команда с attempt_id
+W -> D : Проверить нетерминальность и аренду\nPENDING → IN_FLIGHT
+W -> X : HTTPS: стабильный ключ логической отправки
+X --> W : Принято, provider_message_id
+W -> D : SUCCEEDED + ID провайдера\nРезультат в outbox, коммит
+W -> K : Фиксация смещения; результат из outbox
+K -> O : Результат critical
+O -> D : Идемпотентно DELIVERED\nsuccess_level=PROVIDER_ACCEPTED
+O -> K : Смещение после коммита
+O -> M : Метрики, журнал и контекст трассы
+note over O,W
+ Повтор события не создаёт попытку заново.
+ После DELIVERED команды SMS/email не создаются.
+end note
+@enduml

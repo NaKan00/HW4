@@ -1,0 +1,45 @@
+@startuml
+skinparam defaultFontName SansSerif
+skinparam shadowing false
+skinparam sequenceMessageAlign center
+title Вариант 2: успешный push через очередь задач
+participant "Продукт банка" as P
+participant "API / outbox-публикатор" as A
+database "PostgreSQL" as D
+queue "RabbitMQ: ingress / delivery.tasks" as Q
+participant "Планировщик политики" as O
+participant "Предпочтения" as F
+participant "Push Worker" as W
+participant "Push-провайдер" as X
+participant "Наблюдение" as M
+P -> P : Сохранить notification_id
+P -> A : HTTPS: запрос, устойчивый ID
+A -> D : Уникальный ключ\nACCEPTED + outbox, синхронный коммит
+D --> A : Коммит
+A --> P : 202
+A -> Q : persistent, mandatory, routing key critical
+Q --> A : publisher confirm; проверить отсутствие возврата
+Q -> O : critical.ingress, manual ack
+O -> F : Политика / основной канал
+F --> O : Push
+O -> D : Дедупликация event_id\nPLANNED → IN_PROGRESS; PENDING + outbox
+D --> O : Коммит
+O -> Q : ack входной задачи
+O -> Q : outbox → delivery.tasks, critical.push
+Q --> O : publisher confirm
+Q -> W : quorum queue critical.push; prefetch 10
+W -> D : Аренда, проверка версии; IN_FLIGHT
+W -> X : HTTPS: стабильный ключ
+X --> W : Принято + ID
+W -> D : SUCCEEDED + outbox результата, коммит
+W -> Q : manual ack задачи после коммита
+W -> Q : Результат из outbox, confirms
+Q -> O : Очередь critical.results
+O -> D : Идемпотентно DELIVERED\nУровень PROVIDER_ACCEPTED
+O -> Q : ack результата
+O -> M : Метрики, аудит, трасса
+note over O,Q
+ Задача удаляется после ack, это не смещение журнала.
+ После успеха задания SMS/email не публикуются.
+end note
+@enduml
