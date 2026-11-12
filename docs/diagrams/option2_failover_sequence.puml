@@ -1,0 +1,60 @@
+@startuml
+skinparam defaultFontName SansSerif
+skinparam shadowing false
+skinparam sequenceMessageAlign center
+title Вариант 2: планируемые повторы и переходы каналов
+queue "RabbitMQ: отдельные quorum queues" as Q
+participant "Планировщик / outbox" as O
+database "PostgreSQL" as D
+participant "Пулы каналов" as W
+participant "Push-провайдер" as P
+participant "SMS-провайдер" as S
+participant "Email-провайдер" as E
+participant "Наблюдение" as M
+Q -> W : critical.push, manual ack
+W -> D : IN_FLIGHT, аренда
+W -> P : Попытка push
+P --> W : 503
+W -> D : TRANSIENT_FAILED + outbox результата
+W -> Q : ack после коммита; результат с confirm
+Q -> O : critical.results
+O -> D : next_action_at + запись повтора
+O -> Q : ack результата
+note over O,D : Повтор ждёт в БД, рабочий процесс не спит с unacked
+O -> D : Выбрать наступивший срок, аренда\nКоманда в outbox
+O -> Q : delivery.tasks: critical.push, confirm
+Q -> W : Повтор push
+W -> P : Тот же логический ключ
+P --> W : 503, бюджет исчерпан
+W -> D : Ошибка + outbox, коммит
+W -> Q : ack и результат
+Q -> O : critical.results
+O -> D : Push закрыт, SMS_PENDING + outbox
+O -> Q : ack результата; routing key critical.sms
+Q -> W : SMS-задача ≤ 2 с после решения
+W -> S : Попытка SMS
+S --> W : Временная ошибка
+W -> D : Ошибка + outbox
+W -> Q : ack и результат
+Q -> O : Ошибка SMS
+O -> O : Проверить бюджет и здоровье\nКонтур SMS открыт: перейти к email
+O -> D : EMAIL_PENDING + outbox
+O -> Q : ack результата; critical.email, confirm
+Q -> W : Email-задача
+W -> E : Попытка email
+E --> W : Принято + ID
+W -> D : SUCCEEDED + outbox
+W -> Q : ack и результат
+Q -> O : Успех
+O -> D : DELIVERED; запрет новых попыток
+O -> Q : ack результата
+O -> M : Аудит и метрики переходов
+Q -> W : Redelivery старой задачи после потери ack
+W -> D : Проверка терминального состояния
+W -> Q : ack без внешней отправки
+note over Q,D
+ DLX/DLQ — для технических ошибок; терминальный неуспех
+ сохраняется в БД + outbox, не создаёт бесконечный nack/requeue.
+ Все публикации из outbox используют confirms и проверку маршрута.
+end note
+@enduml
